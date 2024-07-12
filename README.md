@@ -16,6 +16,7 @@ To install PullPanda, ensure you have Go installed on your machine and run:
 
 ```sh
 go get github.com/yourusername/pullpanda
+```
 
 ## Configuration
 
@@ -35,6 +36,7 @@ statuses:
   - open
   - closed
   - merged  # Options: "open", "closed", "merged"
+```
 
 ## Usage
 
@@ -42,6 +44,7 @@ To run PullPanda, use the following command:
 
 ```sh
 go run main.go --config=config.yaml --token=your_github_token --duration=7d --enable-log=true --show-prs=true
+```
 
 ### Command-Line Flags
 
@@ -59,12 +62,14 @@ go run main.go --config=config.yaml --token=your_github_token --duration=7d --en
 
 ```sh
 go build -o pullpanda
+```
 
 
 ### Run the executable with the desired flags
 
 ```sh
 ./pullpanda --config=config.yaml --token=your_github_token --duration=7d --enable-log=true --show-prs=true
+```
 
 
 ## Output
