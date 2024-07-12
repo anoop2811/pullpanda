@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 )
@@ -20,13 +21,19 @@ type Config struct {
 	Handles  []string `yaml:"handles"`
 	Orgs     []string `yaml:"orgs"`
 	Repos    []string `yaml:"repos"`
-	PRStatus string   `yaml:"pr_status"`
+	Statuses []string `yaml:"statuses"`
 }
 
 type PullRequest struct {
 	URL    string `json:"url"`
 	Title  string `json:"title"`
 	Merged bool   `json:"merged"`
+}
+
+type Summary struct {
+	Handle string
+	Counts map[string]int
+	PRs    []PullRequest
 }
 
 var (
@@ -36,6 +43,7 @@ var (
 	endDate    string
 	duration   string
 	enableLog  bool
+	showPRs    bool
 )
 
 var rootCmd = &cobra.Command{
@@ -46,7 +54,11 @@ var rootCmd = &cobra.Command{
 		if enableLog {
 			log.Printf("Loaded config: %+v\n", config)
 		}
-		fetchAllPRs(config)
+		summaries := fetchAllPRs(config)
+		printSummaryTable(summaries, config.Statuses)
+		if showPRs {
+			printDetailedPRs(summaries)
+		}
 	},
 }
 
@@ -57,6 +69,7 @@ func Execute() {
 	rootCmd.PersistentFlags().StringVar(&endDate, "end-date", "", "End date in YYYY-MM-DD format")
 	rootCmd.PersistentFlags().StringVar(&duration, "duration", "", "Duration like 1mo, 1w, 1d, 1h, 1m, 1s")
 	rootCmd.PersistentFlags().BoolVar(&enableLog, "enable-log", false, "Enable logging")
+	rootCmd.PersistentFlags().BoolVar(&showPRs, "show-prs", false, "Show detailed PRs after the summary table")
 	rootCmd.MarkPersistentFlagRequired("token")
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -75,9 +88,9 @@ func loadConfig(configFile string) Config {
 		log.Fatalf("Error parsing config file: %v", err)
 	}
 
-	// Set default PRStatus if not provided
-	if config.PRStatus == "" {
-		config.PRStatus = "merged"
+	// Set default statuses if not provided
+	if len(config.Statuses) == 0 {
+		config.Statuses = []string{"merged"}
 	}
 
 	return config
@@ -120,90 +133,107 @@ func parseDuration(duration string) (time.Duration, error) {
 	}
 }
 
-func fetchAllPRs(config Config) {
+func fetchAllPRs(config Config) []Summary {
 	var wg sync.WaitGroup
-	wg.Add(len(config.Handles))
+	summaries := make([]Summary, len(config.Handles))
 
-	for _, handle := range config.Handles {
-		go func(handle string) {
+	for i, handle := range config.Handles {
+		wg.Add(1)
+		go func(i int, handle string) {
 			defer wg.Done()
-			fetchPRs(handle, config.Orgs, config.Repos, config.PRStatus)
-		}(handle)
+			summaries[i] = fetchPRs(handle, config.Orgs, config.Repos, config.Statuses)
+		}(i, handle)
 	}
 
 	wg.Wait()
+	return summaries
 }
 
-func fetchPRs(handle string, orgs []string, repos []string, prStatus string) {
+func fetchPRs(handle string, orgs []string, repos []string, statuses []string) Summary {
 	client := &http.Client{}
-	query := fmt.Sprintf("author:%s is:pr is:%s", handle, prStatus)
-
-	// Calculate startDate if duration is provided
-	if duration != "" {
-		parsedDuration, err := parseDuration(duration)
-		if err != nil {
-			log.Fatalf("Error parsing duration: %v", err)
-		}
-		startTime := time.Now().Add(-parsedDuration)
-		startDate = startTime.Format("2006-01-02")
-		if enableLog {
-			log.Printf("Parsed duration: %s, start date: %s\n", duration, startDate)
-		}
+	summary := Summary{
+		Handle: handle,
+		Counts: make(map[string]int),
 	}
 
-	if prStatus == "merged" {
-		if startDate != "" {
-			query += fmt.Sprintf(" merged:>=%s", startDate)
-		}
-		if endDate != "" {
-			query += fmt.Sprintf(" merged:<=%s", endDate)
-		}
-	} else {
-		if startDate != "" {
-			query += fmt.Sprintf(" created:>=%s", startDate)
-		}
-		if endDate != "" {
-			query += fmt.Sprintf(" created:<=%s", endDate)
-		}
-	}
+	for _, status := range statuses {
+		query := fmt.Sprintf("author:%s is:pr is:%s", handle, status)
 
-	if len(orgs) > 0 {
-		for _, org := range orgs {
-			orgQuery := query + fmt.Sprintf(" org:%s", org)
-			escapedQuery := url.QueryEscape(orgQuery)
+		// Calculate startDate if duration is provided
+		if duration != "" {
+			parsedDuration, err := parseDuration(duration)
+			if err != nil {
+				log.Fatalf("Error parsing duration: %v", err)
+			}
+			startTime := time.Now().Add(-parsedDuration)
+			startDate = startTime.Format("2006-01-02")
+			if enableLog {
+				log.Printf("Parsed duration: %s, start date: %s\n", duration, startDate)
+			}
+		}
+
+		if status == "merged" {
+			if startDate != "" {
+				query += fmt.Sprintf(" merged:>=%s", startDate)
+			}
+			if endDate != "" {
+				query += fmt.Sprintf(" merged:<=%s", endDate)
+			}
+		} else {
+			if startDate != "" {
+				query += fmt.Sprintf(" created:>=%s", startDate)
+			}
+			if endDate != "" {
+				query += fmt.Sprintf(" created:<=%s", endDate)
+			}
+		}
+
+		if len(orgs) > 0 {
+			for _, org := range orgs {
+				orgQuery := query + fmt.Sprintf(" org:%s", org)
+				escapedQuery := url.QueryEscape(orgQuery)
+				url := fmt.Sprintf("https://api.github.com/search/issues?q=%s", escapedQuery)
+
+				if enableLog {
+					log.Printf("Fetching %s PRs for %s in org %s with query: %s\n", status, handle, org, url)
+				}
+
+				prs := makeRequest(client, url)
+				summary.Counts[status] += len(prs)
+				summary.PRs = append(summary.PRs, prs...)
+			}
+		} else if len(repos) > 0 {
+			for _, repo := range repos {
+				repoQuery := query + fmt.Sprintf(" repo:%s", repo)
+				escapedQuery := url.QueryEscape(repoQuery)
+				url := fmt.Sprintf("https://api.github.com/search/issues?q=%s", escapedQuery)
+
+				if enableLog {
+					log.Printf("Fetching %s PRs for %s in repo %s with query: %s\n", status, handle, repo, url)
+				}
+
+				prs := makeRequest(client, url)
+				summary.Counts[status] += len(prs)
+				summary.PRs = append(summary.PRs, prs...)
+			}
+		} else {
+			escapedQuery := url.QueryEscape(query)
 			url := fmt.Sprintf("https://api.github.com/search/issues?q=%s", escapedQuery)
 
 			if enableLog {
-				log.Printf("Fetching %s PRs for %s in org %s with query: %s\n", prStatus, handle, org, url)
+				log.Printf("Fetching %s PRs for %s with query: %s\n", status, handle, url)
 			}
 
-			makeRequest(client, url)
+			prs := makeRequest(client, url)
+			summary.Counts[status] += len(prs)
+			summary.PRs = append(summary.PRs, prs...)
 		}
-	} else if len(repos) > 0 {
-		for _, repo := range repos {
-			repoQuery := query + fmt.Sprintf(" repo:%s", repo)
-			escapedQuery := url.QueryEscape(repoQuery)
-			url := fmt.Sprintf("https://api.github.com/search/issues?q=%s", escapedQuery)
-
-			if enableLog {
-				log.Printf("Fetching %s PRs for %s in repo %s with query: %s\n", prStatus, handle, repo, url)
-			}
-
-			makeRequest(client, url)
-		}
-	} else {
-		escapedQuery := url.QueryEscape(query)
-		url := fmt.Sprintf("https://api.github.com/search/issues?q=%s", escapedQuery)
-
-		if enableLog {
-			log.Printf("Fetching %s PRs for %s with query: %s\n", prStatus, handle, url)
-		}
-
-		makeRequest(client, url)
 	}
+
+	return summary
 }
 
-func makeRequest(client *http.Client, url string) {
+func makeRequest(client *http.Client, url string) []PullRequest {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		log.Fatalf("Error creating request: %v", err)
@@ -229,7 +259,50 @@ func makeRequest(client *http.Client, url string) {
 		log.Fatalf("Error decoding response: %v", err)
 	}
 
-	for _, pr := range result.Items {
-		fmt.Printf("- %s: %s\n", pr.Title, pr.URL)
+	return result.Items
+}
+
+func printSummaryTable(summaries []Summary, statuses []string) {
+	table := tablewriter.NewWriter(os.Stdout)
+	header := append([]string{"Handle"}, statuses...)
+	header = append(header, "Total")
+	table.SetHeader(header)
+
+	var totalCounts = make(map[string]int)
+
+	for _, summary := range summaries {
+		row := []string{summary.Handle}
+		total := 0
+		for _, status := range statuses {
+			count := summary.Counts[status]
+			row = append(row, strconv.Itoa(count))
+			total += count
+			totalCounts[status] += count
+		}
+		row = append(row, strconv.Itoa(total))
+		table.Append(row)
+	}
+
+	totalRow := []string{"Total"}
+	grandTotal := 0
+	for _, status := range statuses {
+		total := totalCounts[status]
+		totalRow = append(totalRow, strconv.Itoa(total))
+		grandTotal += total
+	}
+	totalRow = append(totalRow, strconv.Itoa(grandTotal))
+	table.SetFooter(totalRow)
+	table.SetFooterAlignment(tablewriter.ALIGN_RIGHT)
+	table.SetAutoMergeCellsByColumnIndex([]int{0})
+
+	table.Render()
+}
+
+func printDetailedPRs(summaries []Summary) {
+	fmt.Println("\nDetailed PRs:")
+	for _, summary := range summaries {
+		for _, pr := range summary.PRs {
+			fmt.Printf("- [%s] %s\n", pr.Title, pr.URL)
+		}
 	}
 }
