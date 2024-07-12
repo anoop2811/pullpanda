@@ -17,9 +17,10 @@ import (
 )
 
 type Config struct {
-	Handles []string `yaml:"handles"`
-	Orgs    []string `yaml:"orgs"`
-	Repos   []string `yaml:"repos"`
+	Handles  []string `yaml:"handles"`
+	Orgs     []string `yaml:"orgs"`
+	Repos    []string `yaml:"repos"`
+	PRStatus string   `yaml:"pr_status"`
 }
 
 type PullRequest struct {
@@ -39,13 +40,13 @@ var (
 
 var rootCmd = &cobra.Command{
 	Use:   "pullpanda",
-	Short: "CLI to measure open-source contributions by fetching merged pull requests of specified GitHub handles",
+	Short: "CLI to measure open-source contributions by fetching pull requests of specified GitHub handles",
 	Run: func(cmd *cobra.Command, args []string) {
 		config := loadConfig(configFile)
 		if enableLog {
 			log.Printf("Loaded config: %+v\n", config)
 		}
-		fetchAllMergedPRs(config)
+		fetchAllPRs(config)
 	},
 }
 
@@ -72,6 +73,11 @@ func loadConfig(configFile string) Config {
 	var config Config
 	if err := yaml.Unmarshal(file, &config); err != nil {
 		log.Fatalf("Error parsing config file: %v", err)
+	}
+
+	// Set default PRStatus if not provided
+	if config.PRStatus == "" {
+		config.PRStatus = "merged"
 	}
 
 	return config
@@ -114,23 +120,23 @@ func parseDuration(duration string) (time.Duration, error) {
 	}
 }
 
-func fetchAllMergedPRs(config Config) {
+func fetchAllPRs(config Config) {
 	var wg sync.WaitGroup
 	wg.Add(len(config.Handles))
 
 	for _, handle := range config.Handles {
 		go func(handle string) {
 			defer wg.Done()
-			fetchMergedPRs(handle, config.Orgs, config.Repos)
+			fetchPRs(handle, config.Orgs, config.Repos, config.PRStatus)
 		}(handle)
 	}
 
 	wg.Wait()
 }
 
-func fetchMergedPRs(handle string, orgs []string, repos []string) {
+func fetchPRs(handle string, orgs []string, repos []string, prStatus string) {
 	client := &http.Client{}
-	query := fmt.Sprintf("author:%s is:pr is:merged", handle)
+	query := fmt.Sprintf("author:%s is:pr is:%s", handle, prStatus)
 
 	// Calculate startDate if duration is provided
 	if duration != "" {
@@ -145,11 +151,20 @@ func fetchMergedPRs(handle string, orgs []string, repos []string) {
 		}
 	}
 
-	if startDate != "" {
-		query += fmt.Sprintf(" merged:>=%s", startDate)
-	}
-	if endDate != "" {
-		query += fmt.Sprintf(" merged:<=%s", endDate)
+	if prStatus == "merged" {
+		if startDate != "" {
+			query += fmt.Sprintf(" merged:>=%s", startDate)
+		}
+		if endDate != "" {
+			query += fmt.Sprintf(" merged:<=%s", endDate)
+		}
+	} else {
+		if startDate != "" {
+			query += fmt.Sprintf(" created:>=%s", startDate)
+		}
+		if endDate != "" {
+			query += fmt.Sprintf(" created:<=%s", endDate)
+		}
 	}
 
 	if len(orgs) > 0 {
@@ -159,7 +174,7 @@ func fetchMergedPRs(handle string, orgs []string, repos []string) {
 			url := fmt.Sprintf("https://api.github.com/search/issues?q=%s", escapedQuery)
 
 			if enableLog {
-				log.Printf("Fetching merged PRs for %s in org %s with query: %s\n", handle, org, url)
+				log.Printf("Fetching %s PRs for %s in org %s with query: %s\n", prStatus, handle, org, url)
 			}
 
 			makeRequest(client, url)
@@ -171,7 +186,7 @@ func fetchMergedPRs(handle string, orgs []string, repos []string) {
 			url := fmt.Sprintf("https://api.github.com/search/issues?q=%s", escapedQuery)
 
 			if enableLog {
-				log.Printf("Fetching merged PRs for %s in repo %s with query: %s\n", handle, repo, url)
+				log.Printf("Fetching %s PRs for %s in repo %s with query: %s\n", prStatus, handle, repo, url)
 			}
 
 			makeRequest(client, url)
@@ -181,7 +196,7 @@ func fetchMergedPRs(handle string, orgs []string, repos []string) {
 		url := fmt.Sprintf("https://api.github.com/search/issues?q=%s", escapedQuery)
 
 		if enableLog {
-			log.Printf("Fetching merged PRs for %s with query: %s\n", handle, url)
+			log.Printf("Fetching %s PRs for %s with query: %s\n", prStatus, handle, url)
 		}
 
 		makeRequest(client, url)
